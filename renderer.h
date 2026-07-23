@@ -1,19 +1,26 @@
 #pragma once
-
-#define VK_USE_PLATFORM_WIN32_KHR
-#ifndef WIN32_LEAN_AND_MEAN
-#  define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
+#ifdef _WIN32
+#  define VK_USE_PLATFORM_WIN32_KHR
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
 #  define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
+#  define VK_USE_PLATFORM_XLIB_KHR
+#  include <X11/Xlib.h>
+#  include <X11/Xutil.h>
+#  include <X11/Xos.h>
 #endif
-#include <windows.h>
+#pragma comment(lib, "vulkan-1.lib")
 #include <vulkan/vulkan.h>
 #include <string>
 #include <vector>
 #include "tessellator.h"
 
-#pragma comment(lib, "vulkan-1.lib")
+
 
 static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 

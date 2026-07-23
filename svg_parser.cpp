@@ -10,21 +10,28 @@
 #include <chrono>
 
 #ifdef _DEBUG
-    #ifndef WIN32_LEAN_AND_MEAN
-        #define WIN32_LEAN_AND_MEAN
+    #ifdef _WIN32
+        #ifndef WIN32_LEAN_AND_MEAN
+            #define WIN32_LEAN_AND_MEAN
+        #endif
+        #ifndef NOMINMAX
+            #define NOMINMAX
+        #endif
+        #include <windows.h>
+        #define SVGLOG(fmt, ...) do { \
+            char _buf[512]; \
+            snprintf(_buf, sizeof(_buf), "[SVG] " fmt "\n", ##__VA_ARGS__); \
+            OutputDebugStringA(_buf); \
+            printf("%s", _buf); \
+        } while(0)
+    #else
+        #include <cstdio>
+        #define SVGLOG(fmt, ...) do { \
+            fprintf(stderr, "[SVG] " fmt "\n", ##__VA_ARGS__); \
+        } while(0)
     #endif
-    #ifndef NOMINMAX
-        #define NOMINMAX
-    #endif
-    #include <windows.h>
-    #define SVGLOG(fmt, ...) do { \
-        char _svgbuf[512]; \
-        snprintf(_svgbuf, sizeof(_svgbuf), "[SVG] " fmt "\n", ##__VA_ARGS__); \
-        OutputDebugStringA(_svgbuf); \
-        printf("%s", _svgbuf); \
-    } while(0)
 #else
-    #define SVGLOG(fmt, ...) do {} while(0)
+    #define TESSLOG(fmt, ...) do {} while(0)
 #endif
 
 namespace xml {
