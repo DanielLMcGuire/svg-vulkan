@@ -31,7 +31,7 @@
         } while(0)
     #endif
 #else
-    #define TESSLOG(fmt, ...) do {} while(0)
+    #define SVGLOG(fmt, ...) do {} while(0)
 #endif
 
 namespace xml {
