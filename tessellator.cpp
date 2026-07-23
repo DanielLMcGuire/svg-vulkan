@@ -108,34 +108,29 @@ static void flattenCubic(std::vector<V2>& pts,
 {
     if(depth>8) { pts.push_back(p3); return; }
 
-    // calc perpendicular distance from point b to line segment ac:
-    // chord_vec = c - a
-    // unit_normal = (-chord_vec.y, chord_vec.x) / ||chord_vec||
-    // dist = |(b - a) ⋅ unit_normal|
-    auto d=[](V2 a,V2 b,V2 c){
-        float dx=c[0]-a[0], dy=c[1]-a[1];
-        float len=sqrtf(dx*dx+dy*dy);
-        if(len<1e-6f) return 0.f;
-        float nx=-dy/len, ny=dx/len;
-        return fabsf((b[0]-a[0])*nx+(b[1]-a[1])*ny);
-    };
+    // calc deviation vectors from the baseline chord
+    float ux = 3.0f * p1[0] - 2.0f * p0[0] - p3[0];
+    float uy = 3.0f * p1[1] - 2.0f * p0[1] - p3[1];
+    float vx = 3.0f * p2[0] - p0[0] - 2.0f * p3[0];
+    float vy = 3.0f * p2[1] - p0[1] - 2.0f * p3[1];
 
-    // total flatness = dist(p1, chord p0p3) + dist(p2, chord p0p3)
-    float flat = d(p0,p1,p3)+d(p0,p2,p3);
-    if(flat<CURVE_TOL){ pts.push_back(p3); return; }
+    // max squared deviation
+    float max_dev_sq = std::max(ux * ux + uy * uy, vx * vx + vy * vy);
+
+    // flatness check: max error is 1/4 of dev vector. 
+    // squared check: dev^2 <= 16 * TOL^2
+    if(max_dev_sq <= 16.0f * CURVE_TOL * CURVE_TOL){ 
+        pts.push_back(p3); 
+        return; 
+    }
 
     // De Casteljau algo for splitting of a cubic Bézier curve at t=0.5:
-    // m_ab = (a + b) / 2
     auto mid=[](V2 a,V2 b){ return V2{(a[0]+b[0])*.5f,(a[1]+b[1])*.5f}; };
     
-    // first order midpoints: m01 = (p0+p1)/2, m12 = (p1+p2)/2, m23 = (p2+p3)/2
     V2 m01=mid(p0,p1),m12=mid(p1,p2),m23=mid(p2,p3);
-    // second order midpoints: m012 = (m01+m12)/2, m123 = (m12+m23)/2
     V2 m012=mid(m01,m12),m123=mid(m12,m23);
-    // final split point: m0123 = (m012+m123)/2
     V2 m0123=mid(m012,m123);
 
-    // recursively flatten left half [p0, m01, m012, m0123] and right half [m0123, m123, m23, p3]
     flattenCubic(pts,p0,m01,m012,m0123,depth+1);
     flattenCubic(pts,m0123,m123,m23,p3,depth+1);
 }
@@ -145,27 +140,22 @@ static void flattenQuad(std::vector<V2>& pts,
 {
     if(depth>8) { pts.push_back(p2); return; }
 
-    // calc perpendicular distance from point b to line segment ac
-    auto d=[](V2 a,V2 b,V2 c){
-        float dx=c[0]-a[0], dy=c[1]-a[1];
-        float len=sqrtf(dx*dx+dy*dy);
-        if(len<1e-6f) return 0.f;
-        float nx=-dy/len, ny=dx/len;
-        return fabsf((b[0]-a[0])*nx+(b[1]-a[1])*ny);
-    };
+    // quadratic deviation vector
+    float ux = 2.0f * p1[0] - p0[0] - p2[0];
+    float uy = 2.0f * p1[1] - p0[1] - p2[1];
 
-    // flatness = dist(p1, chord p0p2)
-    if(d(p0,p1,p2)<CURVE_TOL){ pts.push_back(p2); return; }
+    // flatness check: dev^2 <= 16 * TOL^2
+    if((ux * ux + uy * uy) <= 16.0f * CURVE_TOL * CURVE_TOL){ 
+        pts.push_back(p2); 
+        return; 
+    }
 
     // De Casteljau
     auto mid=[](V2 a,V2 b){ return V2{(a[0]+b[0])*.5f,(a[1]+b[1])*.5f}; };
     
-    // first order midpoints: m01 = (p0+p1)/2, m12 = (p1+p2)/2
     V2 m01=mid(p0,p1),m12=mid(p1,p2);
-    // final split point: m0112 = (m01+m12)/2
     V2 m0112=mid(m01,m12);
 
-    // fecursively flatten left + right again
     flattenQuad(pts,p0,m01,m0112,depth+1);
     flattenQuad(pts,m0112,m12,p2,depth+1);
 }

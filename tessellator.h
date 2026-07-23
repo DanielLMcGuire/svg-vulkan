@@ -21,5 +21,5 @@ struct Mesh {
 
 Mesh tessellateDocument(const SVGDocument& doc);
 
-static constexpr float CURVE_TOL = 0.25f;
+static constexpr float CURVE_TOL = 0.023f;
 static constexpr int   ARC_SEGS  = 64;
