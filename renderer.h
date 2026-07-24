@@ -39,6 +39,7 @@ public:
     void resize(int width, int height);
     void render(float bgR = 1.f, float bgG = 1.f, float bgB = 1.f);
     void present(bool vsync = true);
+    bool saveFrameToPPM(const std::string& path);
 
     VkDevice         device()   const { return m_device; }
     VkPhysicalDevice physDev()  const { return m_physDevice; }

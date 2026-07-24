@@ -19,6 +19,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <cstdio>
+#include <cctype>
+#include <vector>
 #include "renderer.h"
 
 static const char* IMAGE = R"SVG(
@@ -47,6 +49,67 @@ static const char* IMAGE = R"SVG(
     </g>
 </svg>
 )SVG";
+
+struct CliOptions {
+    std::string svgPath;
+    std::string ppmPath;
+    int         rasterWidth  = 800;
+    int         rasterHeight = 600;
+    bool        wantRaster   = false;
+};
+
+static std::vector<std::string> splitCommandLine(const std::string& cmd) {
+    std::vector<std::string> tokens;
+    std::string cur;
+    bool inQuotes = false;
+    for (char c : cmd) {
+        if (c == '"') { inQuotes = !inQuotes; continue; }
+        if (!inQuotes && std::isspace(static_cast<unsigned char>(c))) {
+            if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) tokens.push_back(cur);
+    return tokens;
+}
+
+static bool parseSizeArg(const std::string& s, int& outW, int& outH) {
+    size_t xpos = s.find_first_of("xX");
+    if (xpos == std::string::npos || xpos == 0 || xpos + 1 >= s.size()) return false;
+    try {
+        int w = std::stoi(s.substr(0, xpos));
+        int h = std::stoi(s.substr(xpos + 1));
+        if (w <= 0 || h <= 0) return false;
+        outW = w; outH = h;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static CliOptions parseArgs(const std::vector<std::string>& tokens) {
+    CliOptions opts;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const std::string& tok = tokens[i];
+        if (tok == "--ppm" && i + 1 < tokens.size()) {
+            opts.ppmPath    = tokens[++i];
+            opts.wantRaster = true;
+        } else if (tok.rfind("--ppm=", 0) == 0) {
+            opts.ppmPath    = tok.substr(6);
+            opts.wantRaster = true;
+        } else if (tok == "--size" && i + 1 < tokens.size()) {
+            int w, h;
+            if (parseSizeArg(tokens[++i], w, h)) { opts.rasterWidth = w; opts.rasterHeight = h; }
+        } else if (tok.rfind("--size=", 0) == 0) {
+            int w, h;
+            if (parseSizeArg(tok.substr(7), w, h)) { opts.rasterWidth = w; opts.rasterHeight = h; }
+        } else if (opts.svgPath.empty() && tok.rfind("--", 0) != 0) {
+            opts.svgPath = tok;
+        }
+    }
+    return opts;
+}
 
 static VulkanSVGRenderer g_renderer;
 static int g_width = 800;
@@ -103,6 +166,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmd, int nShow)
     wc.lpszClassName = L"VulkanSVGRenderer";
     RegisterClassExW(&wc);
 
+    CliOptions opts = parseArgs(splitCommandLine(lpCmd ? lpCmd : ""));
+    if (opts.wantRaster) {
+        g_width  = opts.rasterWidth;
+        g_height = opts.rasterHeight;
+    }
+
     RECT wr = { 0, 0, g_width, g_height };
     AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
     HWND hwnd = CreateWindowExW(
@@ -136,19 +205,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmd, int nShow)
     }
 
     std::string svgContent;
-    if (lpCmd && lpCmd[0]) {
-        std::string path(lpCmd);
-        if (!path.empty() && path.front() == '"') path = path.substr(1);
-        if (!path.empty() && path.back() == '"') path.pop_back();
-
-        std::ifstream f(path);
+    if (!opts.svgPath.empty()) {
+        std::ifstream f(opts.svgPath);
         if (f.good()) {
             std::ostringstream ss;
             ss << f.rdbuf();
             svgContent = ss.str();
         } else {
             char msg[512];
-            snprintf(msg, sizeof(msg), "Could not open '%s', using fallback.", path.c_str());
+            snprintf(msg, sizeof(msg), "Could not open '%s', using fallback.", opts.svgPath.c_str());
             MessageBoxA(nullptr, msg, "Warning", MB_OK | MB_ICONWARNING);
             svgContent = IMAGE;
         }
@@ -161,6 +226,24 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmd, int nShow)
     } catch (std::exception& e) {
         MessageBoxA(nullptr, e.what(), "SVG Load Error", MB_OK | MB_ICONERROR);
         return 1;
+    }
+
+    if (opts.wantRaster) {
+        g_renderer.render(1.f, 1.f, 1.f);
+        bool ok = g_renderer.saveFrameToPPM(opts.ppmPath);
+        if (!ok) {
+            char msg[512];
+            snprintf(msg, sizeof(msg), "Failed to write PPM to '%s'.", opts.ppmPath.c_str());
+            MessageBoxA(nullptr, msg, "PPM Export Error", MB_OK | MB_ICONERROR);
+            DestroyWindow(hwnd);
+            return 1;
+        }
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Saved %dx%d PPM raster to '%s'.",
+                 g_width, g_height, opts.ppmPath.c_str());
+        MessageBoxA(nullptr, msg, "PPM Export", MB_OK | MB_ICONINFORMATION);
+        DestroyWindow(hwnd);
+        return 0;
     }
 
     ShowWindow(hwnd, nShow);
@@ -191,6 +274,12 @@ int main(int argc, char** argv)
 #ifdef _DEBUG
     printf("[DEBUG] Vulkan SVG Renderer starting\n");
 #endif
+
+    CliOptions opts = parseArgs(std::vector<std::string>(argv + 1, argv + argc));
+    if (opts.wantRaster) {
+        g_width  = opts.rasterWidth;
+        g_height = opts.rasterHeight;
+    }
 
     Display* display = XOpenDisplay(nullptr);
     if (!display) {
@@ -237,19 +326,15 @@ int main(int argc, char** argv)
     }
 
     std::string svgContent;
-    if (argc > 1) {
-        std::string path(argv[1]);
-        if (!path.empty() && path.front() == '"') path = path.substr(1);
-        if (!path.empty() && path.back() == '"') path.pop_back();
-
-        std::ifstream f(path);
+    if (!opts.svgPath.empty()) {
+        std::ifstream f(opts.svgPath);
         if (f.good()) {
             std::ostringstream ss;
             ss << f.rdbuf();
             svgContent = ss.str();
         } else {
             char msg[512];
-            snprintf(msg, sizeof(msg), "Could not open '%s', using fallback.", path.c_str());
+            snprintf(msg, sizeof(msg), "Could not open '%s', using fallback.", opts.svgPath.c_str());
             ShowError("Warning", msg);
             svgContent = IMAGE;
         }
@@ -267,6 +352,19 @@ int main(int argc, char** argv)
 
     XMapWindow(display, hwnd);
     XFlush(display);
+
+    if (opts.wantRaster) {
+        g_renderer.render(1.f, 1.f, 1.f);
+        bool ok = g_renderer.saveFrameToPPM(opts.ppmPath);
+        XDestroyWindow(display, hwnd);
+        XCloseDisplay(display);
+        if (!ok) {
+            fprintf(stderr, "Failed to write PPM to '%s'.\n", opts.ppmPath.c_str());
+            return 1;
+        }
+        printf("Saved %dx%d PPM raster to '%s'.\n", g_width, g_height, opts.ppmPath.c_str());
+        return 0;
+    }
 
     XEvent ev;
     while (g_running) {

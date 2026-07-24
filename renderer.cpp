@@ -1613,3 +1613,123 @@ void VulkanSVGRenderer::present(bool vsync) {
 
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
+
+bool VulkanSVGRenderer::saveFrameToPPM(const std::string& path) {
+    vkDeviceWaitIdle(m_device);
+
+    const uint32_t width  = m_swapExtent.width;
+    const uint32_t height = m_swapExtent.height;
+    VkImage srcImage = m_swapImages[m_currentImageIndex];
+
+    bool bgrOrder = (m_swapFormat == VK_FORMAT_B8G8R8A8_UNORM  ||
+                     m_swapFormat == VK_FORMAT_B8G8R8A8_SRGB   ||
+                     m_swapFormat == VK_FORMAT_B8G8R8A8_SNORM);
+
+    VkDeviceSize bufSize = VkDeviceSize(width) * VkDeviceSize(height) * 4;
+
+    VkBuffer       stagingBuf = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    if(!createBuffer(bufSize,
+                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      stagingBuf, stagingMem)) {
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo cbai = {};
+    cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandPool        = m_cmdPool;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &cmd);
+
+    VkCommandBufferBeginInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    VkImageMemoryBarrier toTransferSrc = {};
+    toTransferSrc.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toTransferSrc.oldLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    toTransferSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toTransferSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransferSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransferSrc.image               = srcImage;
+    toTransferSrc.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    toTransferSrc.srcAccessMask       = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    toTransferSrc.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &toTransferSrc);
+
+    VkBufferImageCopy region = {};
+    region.bufferOffset      = 0;
+    region.bufferRowLength   = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageOffset       = { 0, 0, 0 };
+    region.imageExtent       = { width, height, 1 };
+
+    vkCmdCopyImageToBuffer(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            stagingBuf, 1, &region);
+
+    VkImageMemoryBarrier backToPresent = toTransferSrc;
+    backToPresent.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    backToPresent.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    backToPresent.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    backToPresent.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &backToPresent);
+
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si = {};
+    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cmd;
+    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+
+    bool ok = false;
+    void* mapped = nullptr;
+    if(vkMapMemory(m_device, stagingMem, 0, bufSize, 0, &mapped) == VK_SUCCESS) {
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(mapped);
+
+        std::ofstream out(path, std::ios::binary);
+        if(out) {
+            out << "P6\n" << width << ' ' << height << "\n255\n";
+
+            std::vector<uint8_t> row(size_t(width) * 3);
+            for(uint32_t y = 0; y < height && out; y++) {
+                const uint8_t* srcRow = src + VkDeviceSize(y) * width * 4;
+                for(uint32_t x = 0; x < width; x++) {
+                    const uint8_t* px = srcRow + size_t(x) * 4;
+                    if(bgrOrder) {
+                        row[size_t(x) * 3 + 0] = px[2]; // R
+                        row[size_t(x) * 3 + 1] = px[1]; // G
+                        row[size_t(x) * 3 + 2] = px[0]; // B
+                    } else {
+                        row[size_t(x) * 3 + 0] = px[0]; // R
+                        row[size_t(x) * 3 + 1] = px[1]; // G
+                        row[size_t(x) * 3 + 2] = px[2]; // B
+                    }
+                }
+                out.write(reinterpret_cast<const char*>(row.data()), std::streamsize(row.size()));
+            }
+            ok = bool(out);
+            out.close();
+        }
+        vkUnmapMemory(m_device, stagingMem);
+    }
+
+    vkDestroyBuffer(m_device, stagingBuf, nullptr);
+    vkFreeMemory(m_device, stagingMem, nullptr);
+
+    RLOG("saveFrameToPPM: %s -> %s (%ux%u)", path.c_str(), ok ? "ok" : "FAILED", width, height);
+    return ok;
+}
