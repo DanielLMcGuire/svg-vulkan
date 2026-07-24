@@ -40,57 +40,51 @@ add_executable(vulkan_svg WIN32
 )
 
 if(WIN32)
-    set(VULKAN_LIB_DIR "$ENV{VULKAN_SDK}/Lib")
-    set(VULKAN_BIN_DIR "$ENV{VULKAN_SDK}/Bin")
-
-    add_library(shaderc_shared SHARED IMPORTED)
-    set_target_properties(shaderc_shared PROPERTIES
-        IMPORTED_IMPLIB   "${VULKAN_LIB_DIR}/shaderc_shared.lib"
-        IMPORTED_LOCATION "${VULKAN_BIN_DIR}/shaderc_shared.dll"
-        INTERFACE_INCLUDE_DIRECTORIES "$ENV{VULKAN_SDK}/Include"
-    )
-
     target_link_libraries(vulkan_svg PRIVATE
         Vulkan::Vulkan
-        shaderc_shared
         user32
         gdi32
     )
-
-    add_custom_command(TARGET vulkan_svg POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${VULKAN_BIN_DIR}/shaderc_shared.dll"
-            "$<TARGET_FILE_DIR:vulkan_svg>"
-        COMMENT "Copying shaderc_shared.dll to output directory"
-    )
-
-    target_compile_definitions(vulkan_svg PRIVATE SHADERC_SHAREDLIB)
 else()
-    set(VULKAN_LIB_DIR "$ENV{VULKAN_SDK}/lib")
-    set(VULKAN_BIN_DIR "$ENV{VULKAN_SDK}/bin")
-
-    add_library(shaderc_shared SHARED IMPORTED)
-    set_target_properties(shaderc_shared PROPERTIES
-        IMPORTED_LOCATION "${VULKAN_LIB_DIR}/libshaderc_shared.so"
-        INTERFACE_INCLUDE_DIRECTORIES "$ENV{VULKAN_SDK}/include"
-    )
-
     find_package(X11 REQUIRED)
 
     target_link_libraries(vulkan_svg PRIVATE
         Vulkan::Vulkan
-        shaderc_shared
         X11::X11
     )
-
-    add_custom_command(TARGET vulkan_svg POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${VULKAN_LIB_DIR}/libshaderc_shared.so"
-            "$<TARGET_FILE_DIR:vulkan_svg>"
-        COMMENT "Copying libshaderc_shared.so to output directory"
-    )
-
-    target_compile_definitions(vulkan_svg PRIVATE SHADERC_SHAREDLIB)
 endif()
 
 apply_common_options(vulkan_svg)
+
+
+find_program(GLSLC_EXE glslc REQUIRED HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+
+set(SHADERS 
+    "${CMAKE_CURRENT_SOURCE_DIR}/shader.vert" 
+    "${CMAKE_CURRENT_SOURCE_DIR}/shader.frag"
+)
+
+set(SPV_FILES "")
+
+foreach(SHADER IN LISTS SHADERS)
+    get_filename_component(SHADER_NAME ${SHADER} NAME)
+    set(SPV_FILE "${CMAKE_CURRENT_BINARY_DIR}/${SHADER_NAME}.spv")
+    
+    add_custom_command(
+        OUTPUT "${SPV_FILE}"
+        COMMAND ${GLSLC_EXE} "${SHADER}" -o "${SPV_FILE}"
+        DEPENDS "${SHADER}"
+        COMMENT "Compiling ${SHADER_NAME} to SPIR-V"
+    )
+    list(APPEND SPV_FILES "${SPV_FILE}")
+endforeach()
+
+add_custom_target(compile_shaders DEPENDS ${SPV_FILES})
+
+add_dependencies(vulkan_svg compile_shaders)
+
+add_custom_command(
+    TARGET vulkan_svg POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SPV_FILES} "$<TARGET_FILE_DIR:vulkan_svg>"
+    COMMENT "Copying compiled shaders to executable directory"
+)

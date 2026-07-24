@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <fstream>
 
 #define VK_CHECK(expr, msg) \
     do { VkResult _r = (expr); \
@@ -40,24 +41,18 @@
     #endif
 #endif
 
-static const char* VS_GLSL = R"GLSL(
-#version 450
-layout(set=0, binding=0) uniform UBO { mat4 proj; } u;
-layout(location=0) in  vec2 inPos;
-layout(location=1) in  vec4 inColor;
-layout(location=0) out vec4 fragColor;
-void main() {
-    gl_Position = u.proj * vec4(inPos, 0.0, 1.0);
-    fragColor   = inColor;
+static std::vector<char> readFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + filename);
+    }
+    size_t fileSize = (size_t) file.tellg();
+    std::vector<char> buffer(fileSize);
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    return buffer;
 }
-)GLSL";
-
-static const char* FS_GLSL = R"GLSL(
-#version 450
-layout(location=0) in  vec4 fragColor;
-layout(location=0) out vec4 outColor;
-void main() { outColor = fragColor; }
-)GLSL";
 
 struct Mat4 { float m[4][4] = {}; };
 static Mat4 ortho2D(float l, float r, float b, float t) {
@@ -90,10 +85,12 @@ VulkanSVGRenderer::~VulkanSVGRenderer() {
 
     cleanupSwapchain();
 
-    SAFE_VK(m_descSetLayout, vkDestroyDescriptorSetLayout(m_device, m_descSetLayout, nullptr));
-    SAFE_VK(m_cmdPool,       vkDestroyCommandPool(m_device, m_cmdPool, nullptr));
-    SAFE_VK(m_device,        vkDestroyDevice(m_device, nullptr));
-    SAFE_VK(m_surface,       vkDestroySurfaceKHR(m_instance, m_surface, nullptr));
+    SAFE_VK(m_vertShaderModule, vkDestroyShaderModule(m_device, m_vertShaderModule, nullptr));
+    SAFE_VK(m_fragShaderModule, vkDestroyShaderModule(m_device, m_fragShaderModule, nullptr));
+    SAFE_VK(m_descSetLayout,    vkDestroyDescriptorSetLayout(m_device, m_descSetLayout, nullptr));
+    SAFE_VK(m_cmdPool,          vkDestroyCommandPool(m_device, m_cmdPool, nullptr));
+    SAFE_VK(m_device,           vkDestroyDevice(m_device, nullptr));
+    SAFE_VK(m_surface,          vkDestroySurfaceKHR(m_instance, m_surface, nullptr));
 
 #ifdef _DEBUG
     if(m_debugMessenger != VK_NULL_HANDLE) {
@@ -199,6 +196,7 @@ bool VulkanSVGRenderer::init(HWND hwnd, int width, int height) {
     if(!createSurface(hwnd))           { RLOG("FAILED createSurface");               return false; }
     if(!pickPhysicalDevice())          { RLOG("FAILED pickPhysicalDevice");           return false; }
     if(!createLogicalDevice())         { RLOG("FAILED createLogicalDevice");          return false; }
+    initShaders();
     if(!createSwapchain())             { RLOG("FAILED createSwapchain");              return false; }
     if(!createDepthStencilResources()) { RLOG("FAILED createDepthStencilResources"); return false; }
     if(!createMSAAResources())         { RLOG("FAILED createMSAAResources");          return false; }
@@ -291,6 +289,7 @@ bool VulkanSVGRenderer::init(Display* display, Window window, int width, int hei
     if(!createSurface(display, window)) { RLOG("FAILED createSurface");               return false; }
     if(!pickPhysicalDevice())          { RLOG("FAILED pickPhysicalDevice");           return false; }
     if(!createLogicalDevice())         { RLOG("FAILED createLogicalDevice");          return false; }
+    initShaders();
     if(!createSwapchain())             { RLOG("FAILED createSwapchain");              return false; }
     if(!createDepthStencilResources()) { RLOG("FAILED createDepthStencilResources"); return false; }
     if(!createMSAAResources())         { RLOG("FAILED createMSAAResources");          return false; }
@@ -754,46 +753,38 @@ bool VulkanSVGRenderer::createDescriptorSetLayout() {
     return true;
 }
 
-VkShaderModule VulkanSVGRenderer::compileGLSL(const char* src, bool isVertex) {
-    shaderc::Compiler compiler;
-    shaderc::CompileOptions opts;
-    opts.SetOptimizationLevel(shaderc_optimization_level_performance);
-    opts.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);
-
-    auto result = compiler.CompileGlslToSpv(
-        src, strlen(src),
-        isVertex ? shaderc_vertex_shader : shaderc_fragment_shader,
-        isVertex ? "vert.glsl" : "frag.glsl",
-        "main", opts);
-
-    if(result.GetCompilationStatus() != shaderc_compilation_status_success)
-        throw std::runtime_error(std::string("Shader compile error: ") +
-                                 result.GetErrorMessage());
-
-    std::vector<uint32_t> spv(result.cbegin(), result.cend());
-
+VkShaderModule VulkanSVGRenderer::createShaderModule(const std::vector<char>& code) {
     VkShaderModuleCreateInfo ci = {};
-    ci.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    ci.codeSize = spv.size() * sizeof(uint32_t);
-    ci.pCode    = spv.data();
+    ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ci.codeSize = code.size();
+    ci.pCode = reinterpret_cast<const uint32_t*>(code.data());
 
     VkShaderModule mod;
     VK_CHECK(vkCreateShaderModule(m_device, &ci, nullptr, &mod), "vkCreateShaderModule");
     return mod;
 }
 
-bool VulkanSVGRenderer::createPipeline() {
-    VkShaderModule vs = compileGLSL(VS_GLSL, true);
-    VkShaderModule fs = compileGLSL(FS_GLSL, false);
+void VulkanSVGRenderer::initShaders() {
+    auto vertCode = readFile("shader.vert.spv");
+    RLOG("Loaded shader.vert.spv");
+    auto fragCode = readFile("shader.frag.spv");
+    RLOG("Loaded shader.frag.spv");
 
+    m_vertShaderModule = createShaderModule(vertCode);
+    RLOG("Initialized vertex shader");
+    m_fragShaderModule = createShaderModule(fragCode);
+    RLOG("Initialized fragment shader");
+}
+
+bool VulkanSVGRenderer::createPipeline() {
     VkPipelineShaderStageCreateInfo stages[2] = {};
     stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vs;
+    stages[0].module = m_vertShaderModule;
     stages[0].pName  = "main";
     stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = fs;
+    stages[1].module = m_fragShaderModule;
     stages[1].pName  = "main";
 
     VkVertexInputBindingDescription binding = {};
@@ -955,9 +946,6 @@ bool VulkanSVGRenderer::createPipeline() {
     m_stencilEOPipeline   = pipes[2];
     m_stencilReadPipeline = pipes[3];
     RLOG("Pipelines created: main + stencilNZ + stencilEO + stencilRead");
-
-    vkDestroyShaderModule(m_device, vs, nullptr);
-    vkDestroyShaderModule(m_device, fs, nullptr);
     return true;
 }
 

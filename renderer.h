@@ -90,7 +90,12 @@ private:
                                VkMemoryPropertyFlags props,
                                VkBuffer& outBuf, VkDeviceMemory& outMem);
     void          copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
-    VkShaderModule compileGLSL(const char* src, bool isVertex);
+    VkShaderModule createShaderModule(const std::vector<char>& code);
+
+    VkShaderModule m_vertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule m_fragShaderModule = VK_NULL_HANDLE;
+
+    void initShaders();
 
     VkInstance               m_instance       = VK_NULL_HANDLE;
     VkSurfaceKHR             m_surface        = VK_NULL_HANDLE;
