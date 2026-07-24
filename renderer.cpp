@@ -1392,8 +1392,9 @@ void VulkanSVGRenderer::loadMesh(const Mesh& mesh) {
 void VulkanSVGRenderer::loadDocument(const SVGDocument& doc) {
     m_svgW = doc.viewport.w;
     m_svgH = doc.viewport.h;
-    RLOG("loadDocument: svgW=%.0f svgH=%.0f  shapes=%d",
-         m_svgW, m_svgH, (int)doc.shapes.size());
+    m_svgTitle = doc.title;
+    RLOG("loadDocument: svgW=%.0f svgH=%.0f  shapes=%d  title='%s'",
+         m_svgW, m_svgH, (int)doc.shapes.size(), m_svgTitle.c_str());
     loadMesh(tessellateDocument(doc));
 }
 

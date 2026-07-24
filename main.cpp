@@ -111,6 +111,13 @@ static CliOptions parseArgs(const std::vector<std::string>& tokens) {
     return opts;
 }
 
+static const char* BASE_WINDOW_TITLE = "Vulkan SVG Renderer";
+
+static std::string buildWindowTitle(const std::string& base, const std::string& svgTitle) {
+    if (svgTitle.empty()) return base;
+    return base + " | " + svgTitle;
+}
+
 static VulkanSVGRenderer g_renderer;
 static int g_width = 800;
 static int g_height = 600;
@@ -226,6 +233,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmd, int nShow)
     } catch (std::exception& e) {
         MessageBoxA(nullptr, e.what(), "SVG Load Error", MB_OK | MB_ICONERROR);
         return 1;
+    }
+
+    std::string newTitle = buildWindowTitle(BASE_WINDOW_TITLE, g_renderer.svgTitle());
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, newTitle.c_str(), -1, nullptr, 0);
+    if (wlen > 0) {
+        std::wstring wtitle(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, newTitle.c_str(), -1, wtitle.data(), wlen);
+        SetWindowTextW(hwnd, wtitle.c_str());
     }
 
     if (opts.wantRaster) {
@@ -349,6 +364,9 @@ int main(int argc, char** argv)
         XCloseDisplay(display);
         return 1;
     }
+
+    std::string newTitle = buildWindowTitle(BASE_WINDOW_TITLE, g_renderer.svgTitle());
+    XStoreName(display, hwnd, newTitle.c_str());
 
     XMapWindow(display, hwnd);
     XFlush(display);

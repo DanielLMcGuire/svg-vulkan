@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <chrono>
 
+static const float PI = 3.14159265f;
+
 #ifdef _DEBUG
     #ifdef _WIN32
         #ifndef WIN32_LEAN_AND_MEAN
@@ -39,6 +41,7 @@ namespace xml {
 struct Attr  { std::string name, value; };
 struct Node  {
     std::string              tag;
+    std::string              text;
     std::vector<Attr>        attrs;
     std::vector<Node>        children;
 
@@ -107,7 +110,21 @@ static void parseChildren(const char*& p, Node& parent) {
         if(*p == '<') {
             parent.children.push_back(parseNode(p));
         } else {
-            while(*p && *p!='<') ++p;
+            while(*p && *p!='<') {
+                if(*p == '&') {
+                    ++p;
+                    std::string ent;
+                    while(*p && *p != ';') ent += *p++;
+                    if(*p) ++p;
+                    if(ent=="lt")        parent.text+='<';
+                    else if(ent=="gt")   parent.text+='>';
+                    else if(ent=="amp")  parent.text+='&';
+                    else if(ent=="quot") parent.text+='"';
+                    else if(ent=="apos") parent.text+='\'';
+                } else {
+                    parent.text += *p++;
+                }
+            }
         }
     }
 }
@@ -630,7 +647,7 @@ static Mat3 parseTransform(const std::string& t) {
             float sy = args.size()>1 ? args[1] : sx;
             m = Mat3::scale(sx, sy);
         } else if(fn=="rotate") {
-            float a = (args.size()>0 ? args[0] : 0.f) * 3.14159265f/180.f;
+            float a = (args.size()>0 ? args[0] : 0.f) * PI/180.f;
             if(args.size()>=3) {
                 m = Mat3::translate(args[1],args[2]) *
                     Mat3::rotate(a) *
@@ -650,9 +667,9 @@ static Mat3 parseTransform(const std::string& t) {
             m.m[1][0]=args[2]; m.m[1][1]=args[3];
             m.m[2][0]=args[4]; m.m[2][1]=args[5];
         } else if(fn=="skewX") {
-            m.m[1][0] = tanf(args[0] * 3.14159265f/180.f);
+            m.m[1][0] = tanf(args[0] * PI/180.f);
         } else if(fn=="skewY") {
-            m.m[0][1] = tanf(args[0] * 3.14159265f/180.f);
+            m.m[0][1] = tanf(args[0] * PI/180.f);
         } else if(!fn.empty()) {
             SVGLOG("WARNING: unknown transform '%s'", fn.c_str());
         }
@@ -763,6 +780,13 @@ static std::vector<std::array<float,2>> parsePoints(const std::string& s) {
     return out;
 }
 
+static std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if(start == std::string::npos) return {};
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
 static float getFloat(const xml::Node& n, const char* attrName, float def=0.f) {
     if(auto* v = n.attr(attrName)) return parseLength(*v);
     return def;
@@ -852,6 +876,14 @@ SVGDocument parseSVG(const std::string& svg) {
     if(!svgNode) {
         SVGLOG("ERROR: no <svg> element found");
         return doc;
+    }
+
+    for(auto& child : svgNode->children) {
+        if(child.tag == "title") {
+            doc.title = trim(child.text);
+            SVGLOG("SVG title: '%s'", doc.title.c_str());
+            break;
+        }
     }
 
     float vbX=0, vbY=0, vbW=0, vbH=0;

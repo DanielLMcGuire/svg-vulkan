@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <chrono>
 
+static const float PI = 3.14159265358979f;
+
 #ifdef _DEBUG
     #ifdef _WIN32
         #ifndef WIN32_LEAN_AND_MEAN
@@ -32,7 +34,6 @@
 #endif
 
 using V2 = std::array<float,2>;
-static const float PI = 3.14159265358979f;
 
 namespace earclip {
 

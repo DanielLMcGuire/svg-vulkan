@@ -44,6 +44,7 @@ public:
     VkDevice         device()   const { return m_device; }
     VkPhysicalDevice physDev()  const { return m_physDevice; }
     VkInstance       instance() const { return m_instance; }
+    const std::string& svgTitle() const { return m_svgTitle; }
 
 private:
     bool createInstance();
@@ -175,6 +176,7 @@ private:
     float m_svgW   = 800.f;
     float m_svgH   = 600.f;
     bool  m_needsResize = false;
+    std::string m_svgTitle;
 
     VkSampleCountFlagBits m_msaaSamples = VK_SAMPLE_COUNT_1_BIT;
     VkImage               m_msaaImage   = VK_NULL_HANDLE;

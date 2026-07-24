@@ -112,4 +112,5 @@ struct SVGViewport {
 struct SVGDocument {
     SVGViewport           viewport;
     std::vector<SVGShape> shapes;
+    std::string           title;
 };
