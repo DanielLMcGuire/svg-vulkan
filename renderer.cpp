@@ -1731,6 +1731,6 @@ bool VulkanSVGRenderer::saveFrameToPPM(const std::string& path) {
     vkDestroyBuffer(m_device, stagingBuf, nullptr);
     vkFreeMemory(m_device, stagingMem, nullptr);
 
-    RLOG("saveFrameToPPM: %s -> %s (%ux%u)", path.c_str(), ok ? "ok" : "FAILED", width, height);
+    RLOG("\n[RNDR] saveFrameToPPM: %s -> %s (%ux%u)", path.c_str(), ok ? "ok" : "FAILED", width, height);
     return ok;
 }
