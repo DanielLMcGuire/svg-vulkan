@@ -105,6 +105,9 @@ struct Style {
     FillRule fillRule    = FillRule::NonZero;
     Color    currentColor = {0,0,0,1};
 
+    bool     display = true;
+    bool     visible = true;
+
     std::vector<float> dashArray;
     float              dashOffset = 0.f;
 

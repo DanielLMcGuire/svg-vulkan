@@ -1,5 +1,5 @@
 #include "svg_parser.h"
-#include "vector_font.h"
+#include "font.h"
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -511,18 +511,6 @@ static void parseStyleSheet(const std::string& css, StyleSheet& sheet) {
     }
 }
 
-static bool isHidden(const xml::Node& node) {
-    if(auto* d = node.attr("display"))    if(*d=="none") return true;
-    if(auto* v = node.attr("visibility")) if(*v=="hidden" || *v=="collapse") return true;
-    if(auto* s = node.attr("style")) {
-        if(s->find("display:none")       != std::string::npos) return true;
-        if(s->find("display: none")      != std::string::npos) return true;
-        if(s->find("visibility:hidden")  != std::string::npos) return true;
-        if(s->find("visibility: hidden") != std::string::npos) return true;
-    }
-    return false;
-}
-
 static Paint parsePaint(const std::string& val) {
     if(val == "none") return Paint::transparent();
     if(val == "currentColor") return Paint::currentColor();
@@ -600,6 +588,9 @@ static void applyDeclarations(const std::string& decls, Style& s) {
         } else if(key == "fill-rule") {
             s.fillRule = (val == "evenodd") ? FillRule::EvenOdd : FillRule::NonZero;
         } else if(key == "display") {
+            s.display = (val != "none");
+        } else if(key == "visibility") {
+            s.visible = !(val == "hidden" || val == "collapse");
         }
     }
 }
@@ -956,33 +947,88 @@ static std::string collapseWhitespace(const std::string& s) {
     return out;
 }
 
-static void emitGlyphShapes(const std::string& text, float x, float y,
-                            const Style& style, const Mat3& tf,
-                            std::vector<SVGShape>& out)
-{
-    if(text.empty() || style.fontSize <= 0.f) return;
-    auto strokes = vfont::layoutText(text, x, y, style.fontSize, style.textAnchor);
-
-    Style glyphStyle       = style;
-    bool  useFillAsInk     = !style.fill.none;
-    glyphStyle.stroke      = useFillAsInk ? style.fill : style.stroke;
-    glyphStyle.strokeOpacity = useFillAsInk ? style.fillOpacity : style.strokeOpacity;
-    glyphStyle.fill        = Paint::transparent();
-    glyphStyle.lineCap     = LineCap::Round;
-    glyphStyle.lineJoin    = LineJoin::Round;
-    glyphStyle.dashArray.clear();
-    glyphStyle.strokeWidth = std::max(0.6f, style.fontSize * 0.09f);
-
-    for(auto& stroke : strokes) {
-        if(stroke.size() < 2) continue;
-        SVGShape s;
-        s.kind      = ShapeKind::Polyline;
-        s.style     = glyphStyle;
-        s.transform = tf;
-        s.points    = stroke;
-        out.push_back(std::move(s));
+static std::vector<float> parseLengthList(const char* s, float percentOf) {
+    std::vector<float> out;
+    if(!s) return out;
+    const char* p = s;
+    while(*p) {
+        while(*p && (isspace((unsigned char)*p) || *p==',')) ++p;
+        if(!*p) break;
+        char* end;
+        strtof(p, &end);
+        if(end == p) break;
+        std::string tok(p, (const char*)end);
+        while(*end && !isspace((unsigned char)*end) && *end!=',') tok += *end++;
+        out.push_back(parseLength(tok, percentOf));
+        p = end;
     }
-    SVGLOG("text run '%s' -> %d glyph strokes", text.c_str(), (int)strokes.size());
+    return out;
+}
+
+static void shiftSegCoord(PathSegment& s, float dx, float dy) {
+    switch(s.cmd) {
+        case PathCmd::MoveTo: case PathCmd::LineTo:
+            s.args[0]+=dx; s.args[1]+=dy; break;
+        case PathCmd::QuadTo:
+            s.args[0]+=dx; s.args[1]+=dy; s.args[2]+=dx; s.args[3]+=dy; break;
+        case PathCmd::CubicTo:
+            s.args[0]+=dx; s.args[1]+=dy; s.args[2]+=dx; s.args[3]+=dy;
+            s.args[4]+=dx; s.args[5]+=dy; break;
+        default: break;
+    }
+}
+
+static std::array<float,2> layoutTextRun(const std::string& text,
+    float startX, float startY,
+    const std::vector<float>& xs, const std::vector<float>& ys,
+    const std::vector<float>& dxs, const std::vector<float>& dys,
+    const Style& style, std::vector<PathSegment>& segsOut)
+{
+    float penX = xs.empty() ? startX : xs[0];
+    float penY = ys.empty() ? startY : ys[0];
+    if(text.empty() || style.fontSize <= 0.f || !vfont::available())
+        return {penX, penY};
+
+    std::vector<PathSegment> chunk;
+    float chunkStartX = penX;
+    uint32_t prevCp = 0;
+    bool havePrev = false;
+    size_t charIdx = 0, byteIdx = 0;
+
+    auto flushChunk = [&](float endX){
+        float width = endX - chunkStartX;
+        float shift = (style.textAnchor=="middle") ? -width*0.5f
+                    : (style.textAnchor=="end")    ? -width
+                    : 0.f;
+        for(auto& s : chunk) shiftSegCoord(s, shift, 0.f);
+        segsOut.insert(segsOut.end(), chunk.begin(), chunk.end());
+        chunk.clear();
+    };
+
+    while(byteIdx < text.size()) {
+        bool isChunkStart = (charIdx==0) || (charIdx < xs.size()) || (charIdx < ys.size());
+        if(isChunkStart && charIdx > 0) {
+            flushChunk(penX);
+            chunkStartX = (charIdx < xs.size()) ? xs[charIdx] : penX;
+            havePrev = false;
+        }
+        if(charIdx < xs.size()) penX = xs[charIdx];
+        if(charIdx < ys.size()) penY = ys[charIdx];
+
+        uint32_t cp = vfont::utf8Decode(text, byteIdx);
+
+        if(havePrev && !isChunkStart)
+            penX += vfont::kernAdvance(prevCp, cp, style.fontSize);
+        if(charIdx < dxs.size()) penX += dxs[charIdx];
+        if(charIdx < dys.size()) penY += dys[charIdx];
+
+        float advance = vfont::appendGlyphPath(chunk, cp, penX, penY, style.fontSize);
+        penX += advance;
+        prevCp = cp; havePrev = true;
+        charIdx++;
+    }
+    flushChunk(penX);
+    return {penX, penY};
 }
 
 struct ParseCtx {
@@ -992,17 +1038,46 @@ struct ParseCtx {
     int useDepth = 0;
 };
 
+static bool stylesEqualForText(const Style& a, const Style& b) {
+    auto paintEq = [](const Paint& x, const Paint& y){
+        if(x.none != y.none) return false;
+        if(x.none) return true;
+        if(x.useCurrentColor != y.useCurrentColor) return false;
+        if(x.gradientId != y.gradientId) return false;
+        if(x.useCurrentColor || x.isGradient()) return true;
+        return x.color.r==y.color.r && x.color.g==y.color.g &&
+               x.color.b==y.color.b && x.color.a==y.color.a;
+    };
+    return a.fontSize   == b.fontSize   &&
+           a.textAnchor == b.textAnchor &&
+           a.fillOpacity   == b.fillOpacity   &&
+           a.strokeOpacity == b.strokeOpacity &&
+           a.opacity       == b.opacity       &&
+           a.strokeWidth   == b.strokeWidth   &&
+           a.fillRule  == b.fillRule  &&
+           a.lineCap   == b.lineCap   &&
+           a.lineJoin  == b.lineJoin  &&
+           a.miterLimit == b.miterLimit &&
+           a.dashArray == b.dashArray &&
+           a.dashOffset == b.dashOffset &&
+           a.currentColor.r==b.currentColor.r && a.currentColor.g==b.currentColor.g &&
+           a.currentColor.b==b.currentColor.b && a.currentColor.a==b.currentColor.a &&
+           paintEq(a.fill, b.fill) && paintEq(a.stroke, b.stroke);
+}
+
 static void emitText(const xml::Node& node, const Mat3& tf, const Style& style,
                      const ParseCtx& ctx, std::vector<SVGShape>& out)
 {
-    float x = getFloat(node,"x", pctW(*ctx.vp), 0.f) + getFloat(node,"dx", pctW(*ctx.vp), 0.f);
-    float y = getFloat(node,"y", pctH(*ctx.vp), 0.f) + getFloat(node,"dy", pctH(*ctx.vp), 0.f);
+    auto xs  = parseLengthList(node.attr("x")  ? node.attr("x")->c_str()  : nullptr, pctW(*ctx.vp));
+    auto ys  = parseLengthList(node.attr("y")  ? node.attr("y")->c_str()  : nullptr, pctH(*ctx.vp));
+    auto dxs = parseLengthList(node.attr("dx") ? node.attr("dx")->c_str() : nullptr, pctW(*ctx.vp));
+    auto dys = parseLengthList(node.attr("dy") ? node.attr("dy")->c_str() : nullptr, pctH(*ctx.vp));
 
+    std::vector<PathSegment> segs;
     std::string mainText = collapseWhitespace(node.text);
     if(!mainText.empty() && mainText.front()==' ') mainText.erase(mainText.begin());
-    if(!mainText.empty())
-        emitGlyphShapes(mainText, x, y, style, tf, out);
-    x += vfont::measureText(mainText) * style.fontSize;
+
+    auto pen = layoutTextRun(mainText, 0.f, 0.f, xs, ys, dxs, dys, style, segs);
 
     for(auto& child : node.children) {
         if(child.tag != "tspan") continue;
@@ -1010,21 +1085,55 @@ static void emitText(const xml::Node& node, const Mat3& tf, const Style& style,
         Style spanStyle = parseStyle(child, style, *ctx.sheet);
         Mat3  spanTf    = tf;
         if(auto* t = child.attr("transform")) spanTf = tf * parseTransform(*t);
+        bool needsOwnShape = (child.attr("transform") != nullptr);
 
-        float sx = child.attr("x") ? getFloat(child,"x", pctW(*ctx.vp)) : x;
-        float sy = child.attr("y") ? getFloat(child,"y", pctH(*ctx.vp)) : y;
-        sx += getFloat(child,"dx", pctW(*ctx.vp), 0.f);
-        sy += getFloat(child,"dy", pctH(*ctx.vp), 0.f);
+        auto sxs  = parseLengthList(child.attr("x")  ? child.attr("x")->c_str()  : nullptr, pctW(*ctx.vp));
+        auto sys  = parseLengthList(child.attr("y")  ? child.attr("y")->c_str()  : nullptr, pctH(*ctx.vp));
+        auto sdxs = parseLengthList(child.attr("dx") ? child.attr("dx")->c_str() : nullptr, pctW(*ctx.vp));
+        auto sdys = parseLengthList(child.attr("dy") ? child.attr("dy")->c_str() : nullptr, pctH(*ctx.vp));
 
         std::string spanText = collapseWhitespace(child.text);
         if(!spanText.empty() && spanText.front()==' ') spanText.erase(spanText.begin());
-        if(!spanText.empty()) {
-            emitGlyphShapes(spanText, sx, sy, spanStyle, spanTf, out);
-            x = sx + vfont::measureText(spanText) * spanStyle.fontSize;
-            y = sy;
-        } else {
-            x = sx; y = sy;
+        if(spanText.empty()) {
+            if(!sxs.empty()) pen[0] = sxs[0];
+            if(!sys.empty()) pen[1] = sys[0];
+            continue;
         }
+
+        if(needsOwnShape) {
+            std::vector<PathSegment> spanSegs;
+            layoutTextRun(spanText, pen[0], pen[1], sxs, sys, sdxs, sdys, spanStyle, spanSegs);
+            if(!spanSegs.empty()) {
+                SVGShape s;
+                s.kind = ShapeKind::Path;
+                s.style = spanStyle;
+                s.transform = spanTf;
+                s.path = std::move(spanSegs);
+                out.push_back(std::move(s));
+            }
+        } else if(stylesEqualForText(spanStyle, style)) {
+            pen = layoutTextRun(spanText, pen[0], pen[1], sxs, sys, sdxs, sdys, spanStyle, segs);
+        } else {
+            std::vector<PathSegment> spanSegs;
+            pen = layoutTextRun(spanText, pen[0], pen[1], sxs, sys, sdxs, sdys, spanStyle, spanSegs);
+            if(!spanSegs.empty()) {
+                SVGShape s;
+                s.kind = ShapeKind::Path;
+                s.style = spanStyle;
+                s.transform = spanTf;
+                s.path = std::move(spanSegs);
+                out.push_back(std::move(s));
+            }
+        }
+    }
+
+    if(!segs.empty()) {
+        SVGShape s;
+        s.kind      = ShapeKind::Path;
+        s.style     = style;
+        s.transform = tf;
+        s.path      = std::move(segs);
+        out.push_back(std::move(s));
     }
 }
 
@@ -1035,12 +1144,12 @@ static void collectShapes(const xml::Node& node,
                           std::vector<SVGShape>& out,
                           bool forceDescend = false)
 {
-    if(isHidden(node)) {
+    Style  nodeStyle = parseStyle(node, parentStyle, *ctx.sheet);
+    if(!nodeStyle.display || !nodeStyle.visible) {
         SVGLOG("skipping hidden node '%s'", node.tag.c_str());
         return;
     }
 
-    Style  nodeStyle = parseStyle(node, parentStyle, *ctx.sheet);
     Mat3   nodeTf    = parentTf;
     if(auto* t = node.attr("transform"))
         nodeTf = parentTf * parseTransform(*t);
