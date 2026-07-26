@@ -89,10 +89,3 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SPV_FILES} "$<TARGET_FILE_DIR:vulkan_svg>"
     COMMENT "Copying compiled shaders to executable directory"
 )
-
-add_custom_command(
-    TARGET vulkan_svg POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/DejaVuSans.ttf" "$<TARGET_FILE_DIR:vulkan_svg>"
-    COMMENT "Copying bundled font to executable directory"
-)
