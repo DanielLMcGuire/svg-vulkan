@@ -35,7 +35,7 @@ public:
 #endif
     void loadMesh(const Mesh& mesh);
     void loadDocument(const SVGDocument& doc);
-    void loadSVGString(const std::string& svg);
+    void loadSVGString(const std::string& svg, const std::string& filePath);
     void resize(int width, int height);
     void render(float bgR = 1.f, float bgG = 1.f, float bgB = 1.f);
     void present(bool vsync = true);
@@ -45,6 +45,7 @@ public:
     VkPhysicalDevice physDev()  const { return m_physDevice; }
     VkInstance       instance() const { return m_instance; }
     const std::string& svgTitle() const { return m_svgTitle; }
+    const std::string& svgPath() const { return m_svgPath; }
 
 private:
     bool createInstance();
@@ -177,6 +178,7 @@ private:
     float m_svgH   = 600.f;
     bool  m_needsResize = false;
     std::string m_svgTitle;
+    std::string m_svgPath;
 
     VkSampleCountFlagBits m_msaaSamples = VK_SAMPLE_COUNT_1_BIT;
     VkImage               m_msaaImage   = VK_NULL_HANDLE;

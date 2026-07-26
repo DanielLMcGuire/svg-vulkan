@@ -2,4 +2,4 @@
 #include "svg_types.h"
 #include <string>
 
-SVGDocument parseSVG(const std::string& svg);
+SVGDocument parseSVG(const std::string& svg, const std::string& filePath);

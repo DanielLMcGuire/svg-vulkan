@@ -23,8 +23,7 @@
 #include <vector>
 #include "renderer.h"
 
-static const char* IMAGE = R"SVG(
-<?xml version="1.0" encoding="UTF-8"?>
+static const char* IMAGE = R"SVG(<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
  <title>SVG logo</title>
     <rect width="100" height="100" fill="#FF9900" rx="4" ry="4"/>
@@ -47,8 +46,7 @@ static const char* IMAGE = R"SVG(
       <path fill="#3f3f3f" d="M14.657 54.211h71.394c2.908 0 5.312 2.385 5.312 5.315v17.91c-27.584-3.403-54.926-8.125-82.011-7.683V59.526c.001-2.93 2.391-5.315 5.305-5.315z"/>
       <path fill="#ffffff" stroke="#000000" stroke-width=".5035" d="M18.312 72.927c-2.103-2.107-3.407-5.028-3.407-8.253 0-6.445 5.223-11.672 11.666-11.672 6.446 0 11.667 5.225 11.667 11.672h-6.832c0-2.674-2.168-4.837-4.835-4.837-2.663 0-4.838 2.163-4.838 4.837 0 1.338.549 2.536 1.415 3.42.883.874 2.101 1.405 3.423 1.405v.012c3.232 0 6.145 1.309 8.243 3.416 2.118 2.111 3.424 5.034 3.424 8.248 0 6.454-5.221 11.68-11.667 11.68-6.442 0-11.666-5.222-11.666-11.68h6.828c0 2.679 2.175 4.835 4.838 4.835 2.667 0 4.835-2.156 4.835-4.835 0-1.329-.545-2.527-1.429-3.407-.864-.88-2.082-1.418-3.406-1.418-3.23 0-6.142-1.314-8.259-3.423zM61.588 53.005l-8.244 39.849h-6.85l-8.258-39.849h6.846l4.838 23.337 4.835-23.337zM73.255 69.513h11.683v11.664c0 6.452-5.226 11.678-11.669 11.678-6.441 0-11.666-5.226-11.666-11.678V64.676h-.017C61.586 58.229 66.827 53 73.253 53c6.459 0 11.683 5.225 11.683 11.676h-6.849c0-2.674-2.152-4.837-4.834-4.837-2.647 0-4.82 2.163-4.82 4.837v16.501c0 2.675 2.173 4.837 4.82 4.837 2.682 0 4.834-2.162 4.834-4.827V76.348h-4.834l.002-6.835z"/>
     </g>
-</svg>
-)SVG";
+</svg>)SVG";
 
 struct CliOptions {
     std::string svgPath;
@@ -113,10 +111,10 @@ static CliOptions parseArgs(const std::vector<std::string>& tokens) {
 
 static const char* BASE_WINDOW_TITLE = "Vulkan SVG Renderer";
 
-static std::string buildWindowTitle(const std::string& base, const std::string& svgTitle) {
-    if (svgTitle.empty()) return base;
-    return base + " | " + svgTitle;
-}
+#define BUILD_TITLE(x, y, z) \
+    ((y).empty() ? ((z).empty() ? (x) : ((x) + std::string(" | ") + (z))) \
+                 : ((z).empty() ? ((x) + std::string(" | ") + (y)) \
+                                : ((x) + std::string(" | ") + (y) + std::string(" | ") + (z))))
 
 static VulkanSVGRenderer g_renderer;
 static int g_width = 800;
@@ -161,7 +159,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmd, int nShow)
     AllocConsole();
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
-    printf("[DEBUG] Vulkan SVG Renderer starting\n");
+    printf("[DBG]  Vulkan SVG Renderer starting\n");
 #endif
 
     WNDCLASSEXW wc = {};
@@ -229,13 +227,17 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmd, int nShow)
     }
 
     try {
-        g_renderer.loadSVGString(svgContent);
+        if (!opts.svgPath.empty()) {
+            g_renderer.loadSVGString(svgContent, opts.svgPath);
+        } else {
+            g_renderer.loadSVGString(svgContent, "default.svg");
+        }
     } catch (std::exception& e) {
         MessageBoxA(nullptr, e.what(), "SVG Load Error", MB_OK | MB_ICONERROR);
         return 1;
     }
 
-    std::string newTitle = buildWindowTitle(BASE_WINDOW_TITLE, g_renderer.svgTitle());
+    std::string newTitle = BUILD_TITLE(BASE_WINDOW_TITLE, g_renderer.svgTitle(), g_renderer.svgPath());
     int wlen = MultiByteToWideChar(CP_UTF8, 0, newTitle.c_str(), -1, nullptr, 0);
     if (wlen > 0) {
         std::wstring wtitle(wlen, L'\0');
@@ -287,7 +289,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmd, int nShow)
 int main(int argc, char** argv)
 {
 #ifdef _DEBUG
-    printf("[DEBUG] Vulkan SVG Renderer starting\n");
+    printf("[DBG]  Vulkan SVG Renderer starting\n");
 #endif
 
     CliOptions opts = parseArgs(std::vector<std::string>(argv + 1, argv + argc));
@@ -358,14 +360,18 @@ int main(int argc, char** argv)
     }
 
     try {
-        g_renderer.loadSVGString(svgContent);
+        if (!opts.svgPath.empty()) {
+            g_renderer.loadSVGString(svgContent, opts.svgPath);
+        } else {
+            g_renderer.loadSVGString(svgContent, "default.svg");
+        }
     } catch (std::exception& e) {
         ShowError("SVG Load Error", e.what());
         XCloseDisplay(display);
         return 1;
     }
 
-    std::string newTitle = buildWindowTitle(BASE_WINDOW_TITLE, g_renderer.svgTitle());
+    std::string newTitle = BUILD_TITLE(BASE_WINDOW_TITLE, g_renderer.svgTitle(), g_renderer.svgPath());
     XStoreName(display, hwnd, newTitle.c_str());
 
     XMapWindow(display, hwnd);

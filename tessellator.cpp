@@ -5,6 +5,8 @@
 #include <cassert>
 #include <cstdio>
 #include <chrono>
+#include <functional>
+#include <unordered_map>
 
 static const float PI = 3.14159265358979f;
 
@@ -330,66 +332,130 @@ static V2 normalize(V2 v) {
 }
 static V2 perp(V2 v){ return {-v[1],v[0]}; }
 
-// Compute the miter offset at a join vertex given its two neighbouring directions.
-static V2 jointOffset(V2 prev, V2 cur, V2 next, float hw) {
-    V2 d0 = normalize({cur[0]-prev[0], cur[1]-prev[1]});
-    V2 d1 = normalize({next[0]-cur[0], next[1]-cur[1]});
-    V2 n0 = perp(d0);
-    V2 n1 = perp(d1);
-    float denom = 1.f + n0[0]*n1[0] + n0[1]*n1[1]; // 1 + dot(n0,n1)
-    if(fabsf(denom) < 0.001f) denom = 0.001f;
-    float scale  = hw / denom;
-    V2 offset    = {(n0[0]+n1[0])*scale, (n0[1]+n1[1])*scale};
-    // clamp miter
-    float len2   = offset[0]*offset[0] + offset[1]*offset[1];
-    float maxLen = hw * 4.f;
-    if(len2 > maxLen*maxLen) {
-        float s = maxLen / sqrtf(len2);
-        offset  = {offset[0]*s, offset[1]*s};
+static void appendArcFan(std::vector<V2>& out, V2 center, V2 from, V2 to,
+                          float hw, const V2* preferDir = nullptr)
+{
+    float a0 = atan2f(from[1], from[0]);
+    float a1 = atan2f(to[1],   to[0]);
+    float da = a1 - a0;
+    while(da >  PI) da -= 2.f*PI;
+    while(da < -PI) da += 2.f*PI;
+    if(preferDir) {
+        float mid = a0 + da*0.5f;
+        V2 midDir = {cosf(mid), sinf(mid)};
+        if(midDir[0]*(*preferDir)[0] + midDir[1]*(*preferDir)[1] < 0.f)
+            da = (da > 0.f) ? da - 2.f*PI : da + 2.f*PI;
     }
-    return offset;
+    int segs = std::max(1, (int)(fabsf(da)/0.3927f + 0.5f)); // ~22.5 deg/step
+    V2 prev = { center[0]+from[0], center[1]+from[1] };
+    for(int s = 1; s <= segs; s++) {
+        float t = a0 + da*s/segs;
+        V2 cur = { center[0]+hw*cosf(t), center[1]+hw*sinf(t) };
+        out.push_back(center); out.push_back(prev); out.push_back(cur);
+        prev = cur;
+    }
+}
+
+static void appendJoinWedge(std::vector<V2>& out, V2 vertex, V2 n0, V2 n1,
+                             float hw, float sign, LineJoin join, float miterLimit)
+{
+    V2 o0 = { n0[0]*hw*sign, n0[1]*hw*sign };
+    V2 o1 = { n1[0]*hw*sign, n1[1]*hw*sign };
+
+    if(join == LineJoin::Round) {
+        appendArcFan(out, vertex, o0, o1, hw);
+        return;
+    }
+    if(join == LineJoin::Miter) {
+        float denom = 1.f + (n0[0]*n1[0] + n0[1]*n1[1]);
+        if(denom > 1e-4f) {
+            float scale = hw/denom;
+            V2 offset = { (n0[0]+n1[0])*scale*sign, (n0[1]+n1[1])*scale*sign };
+            float offLen = sqrtf(offset[0]*offset[0] + offset[1]*offset[1]);
+            if(offLen <= hw*miterLimit + 1e-3f) {
+                V2 tip = { vertex[0]+offset[0], vertex[1]+offset[1] };
+                out.push_back(vertex); out.push_back({vertex[0]+o0[0],vertex[1]+o0[1]}); out.push_back(tip);
+                out.push_back(vertex); out.push_back(tip); out.push_back({vertex[0]+o1[0],vertex[1]+o1[1]});
+                return;
+            }
+            // exceeds miterlimit, fall back to bevel
+        }
+    }
+    // bevel (and fallback)
+    out.push_back(vertex);
+    out.push_back({vertex[0]+o0[0], vertex[1]+o0[1]});
+    out.push_back({vertex[0]+o1[0], vertex[1]+o1[1]});
+}
+
+static void appendCap(std::vector<V2>& out, V2 endpoint, V2 normal, V2 outward,
+                       float hw, LineCap cap)
+{
+    if(cap == LineCap::Butt) return;
+    V2 l = {  normal[0]*hw,  normal[1]*hw };
+    V2 r = { -normal[0]*hw, -normal[1]*hw };
+    if(cap == LineCap::Square) {
+        V2 ext = { outward[0]*hw, outward[1]*hw };
+        V2 la = {endpoint[0]+l[0], endpoint[1]+l[1]};
+        V2 ra = {endpoint[0]+r[0], endpoint[1]+r[1]};
+        V2 lb = {la[0]+ext[0], la[1]+ext[1]};
+        V2 rb = {ra[0]+ext[0], ra[1]+ext[1]};
+        out.insert(out.end(), {la, ra, rb, la, rb, lb});
+    } else { // round
+        appendArcFan(out, endpoint, l, r, hw, &outward);
+    }
 }
 
 static void appendStrokeContour(std::vector<V2>& fillPoly,
-    const std::vector<V2>& pts, float hw, bool closed,
-    LineCap cap, LineJoin join)
+    const std::vector<V2>& ptsIn, float hw, bool closed,
+    LineCap cap, LineJoin join, float miterLimit)
 {
-    if(pts.size() < 2) return;
-    int n = (int)pts.size();
-
-    std::vector<V2> left(n), right(n);
-
-    for(int i = 0; i < n; i++) {
-        V2 offset;
-        if(closed) {
-            V2 prev = pts[(i + n - 1) % n];
-            V2 next = pts[(i + 1)     % n];
-            offset  = jointOffset(prev, pts[i], next, hw);
-        } else if(i == 0) {
-            V2 d  = normalize({pts[1][0]-pts[0][0], pts[1][1]-pts[0][1]});
-            V2 no = perp(d);
-            offset = {no[0]*hw, no[1]*hw};
-        } else if(i == n-1) {
-            V2 d  = normalize({pts[n-1][0]-pts[n-2][0], pts[n-1][1]-pts[n-2][1]});
-            V2 no = perp(d);
-            offset = {no[0]*hw, no[1]*hw};
-        } else {
-            offset = jointOffset(pts[i-1], pts[i], pts[i+1], hw);
-        }
-
-        left[i]  = {pts[i][0]+offset[0], pts[i][1]+offset[1]};
-        right[i] = {pts[i][0]-offset[0], pts[i][1]-offset[1]};
+    std::vector<V2> pts = ptsIn;
+    if(closed && pts.size() > 1) {
+        V2 f = pts.front(), b = pts.back();
+        if(fabsf(f[0]-b[0]) < 1e-6f && fabsf(f[1]-b[1]) < 1e-6f) pts.pop_back();
     }
+    int n = (int)pts.size();
+    if(n < 2) return;
 
     int segCount = closed ? n : n - 1;
+    if(segCount < 1) return;
+
+    std::vector<V2> normals(segCount);
     for(int i = 0; i < segCount; i++) {
-        int j = (i + 1) % n;
-        fillPoly.push_back(left[i]);
-        fillPoly.push_back(right[i]);
-        fillPoly.push_back(right[j]);
-        fillPoly.push_back(left[i]);
-        fillPoly.push_back(right[j]);
-        fillPoly.push_back(left[j]);
+        V2 a = pts[i], b = pts[(i+1)%n];
+        normals[i] = perp(normalize({b[0]-a[0], b[1]-a[1]}));
+    }
+
+    for(int i = 0; i < segCount; i++) {
+        V2 a = pts[i], b = pts[(i+1)%n];
+        V2 no = normals[i];
+        V2 la = {a[0]+no[0]*hw, a[1]+no[1]*hw}, ra = {a[0]-no[0]*hw, a[1]-no[1]*hw};
+        V2 lb = {b[0]+no[0]*hw, b[1]+no[1]*hw}, rb = {b[0]-no[0]*hw, b[1]-no[1]*hw};
+        fillPoly.insert(fillPoly.end(), {la, ra, rb,  la, rb, lb});
+    }
+
+    int joinCount = closed ? segCount : segCount - 1;
+    for(int k = 0; k < joinCount; k++) {
+        int i      = (k+1) % n;
+        V2  n0     = normals[k];
+        V2  n1     = normals[(k+1) % segCount];
+
+        float dot   = n0[0]*n1[0] + n0[1]*n1[1];
+        float cross = n0[0]*n1[1] - n0[1]*n1[0];
+        if(fabsf(cross) < 1e-5f && dot > 0.f) continue;
+
+        float sign = (cross < 0.f) ? 1.f : -1.f;
+        appendJoinWedge(fillPoly, pts[i], n0, n1, hw, sign, join, miterLimit);
+        appendJoinWedge(fillPoly, pts[i], n0, n1, hw, -sign, LineJoin::Bevel, miterLimit);
+    }
+
+    if(!closed) {
+        V2 dir0 = normalize({pts[1][0]-pts[0][0], pts[1][1]-pts[0][1]});
+        V2 outward0 = {-dir0[0], -dir0[1]};
+        appendCap(fillPoly, pts[0], normals[0], outward0, hw, cap);
+
+        V2 dirN = normalize({pts[n-1][0]-pts[n-2][0], pts[n-1][1]-pts[n-2][1]});
+        appendCap(fillPoly, pts[n-1], normals[segCount-1], dirN, hw, cap);
     }
 }
 
@@ -420,13 +486,148 @@ static std::vector<V2> makeEllipse(float cx,float cy,float rx,float ry, int segs
     return pts;
 }
 
+using PaintEval = std::function<Color(float,float)>;
+
+static Color sampleGradientStops(const std::vector<GradientStop>& stops, float t, SpreadMethod spread) {
+    if(stops.empty()) return {0,0,0,0};
+    switch(spread) {
+    case SpreadMethod::Pad:     t = std::max(0.f, std::min(1.f, t)); break;
+    case SpreadMethod::Repeat:  t = t - floorf(t); break;
+    case SpreadMethod::Reflect: {
+        float m = fmodf(fabsf(t), 2.f);
+        t = (m > 1.f) ? 2.f - m : m;
+        break;
+    }
+    }
+    if(stops.size() == 1) return stops[0].color;
+    if(t <= stops.front().offset) return stops.front().color;
+    if(t >= stops.back().offset)  return stops.back().color;
+    for(size_t i = 0; i + 1 < stops.size(); i++) {
+        float o0 = stops[i].offset, o1 = stops[i+1].offset;
+        if(t >= o0 && t <= o1) {
+            float f = (o1 > o0) ? (t - o0) / (o1 - o0) : 0.f;
+            const Color& c0 = stops[i].color;
+            const Color& c1 = stops[i+1].color;
+            return { c0.r + (c1.r-c0.r)*f, c0.g + (c1.g-c0.g)*f,
+                     c0.b + (c1.b-c0.b)*f, c0.a + (c1.a-c0.a)*f };
+        }
+    }
+    return stops.back().color;
+}
+
+static PaintEval makePaintEval(const Paint& paint, const Style& style,
+    const std::unordered_map<std::string,GradientDef>* gradients,
+    float bboxMinX, float bboxMinY, float bboxW, float bboxH,
+    float opacityMul)
+{
+    if(paint.none)
+        return [](float,float){ return Color::none(); };
+
+    if(paint.isGradient() && gradients) {
+        auto it = gradients->find(paint.gradientId);
+        if(it != gradients->end() && !it->second.stops.empty()) {
+            const GradientDef* g = &it->second;
+            float safeW = (fabsf(bboxW) < 1e-6f) ? 1.f : bboxW;
+            float safeH = (fabsf(bboxH) < 1e-6f) ? 1.f : bboxH;
+            return [g, bboxMinX, bboxMinY, safeW, safeH, opacityMul](float px, float py) -> Color {
+                float nx, ny;
+                if(g->userSpaceOnUse) { nx = px; ny = py; }
+                else { nx = (px - bboxMinX) / safeW; ny = (py - bboxMinY) / safeH; }
+                auto gp = g->gradientTransform.apply(nx, ny);
+
+                float t;
+                if(g->kind == GradientKind::Linear) {
+                    float dx = g->x2 - g->x1, dy = g->y2 - g->y1;
+                    float len2 = dx*dx + dy*dy;
+                    t = (len2 < 1e-12f) ? 0.f : ((gp[0]-g->x1)*dx + (gp[1]-g->y1)*dy) / len2;
+                } else {
+                    float pfx = gp[0]-g->fx, pfy = gp[1]-g->fy;
+                    float cfx = g->fx-g->cx, cfy = g->fy-g->cy;
+                    float a = pfx*pfx + pfy*pfy;
+                    if(a < 1e-12f) t = 0.f;
+                    else {
+                        float b = 2.f*(cfx*pfx + cfy*pfy);
+                        float c = cfx*cfx + cfy*cfy - g->r*g->r;
+                        float disc = std::max(0.f, b*b - 4.f*a*c);
+                        float ts = (-b + sqrtf(disc)) / (2.f*a);
+                        t = (ts > 1e-6f) ? 1.f/ts : 0.f;
+                    }
+                }
+                Color c = sampleGradientStops(g->stops, t, g->spread);
+                c.a *= opacityMul;
+                return c;
+            };
+        }
+    }
+
+    Color base = paint.useCurrentColor ? style.currentColor : paint.color;
+    base.a *= opacityMul;
+    return [base](float,float){ return base; };
+}
+
+static void computeBounds(const std::vector<V2>& pts, float& minX, float& minY, float& maxX, float& maxY) {
+    minX = minY = 1e30f; maxX = maxY = -1e30f;
+    for(auto& p : pts) {
+        minX = std::min(minX, p[0]); minY = std::min(minY, p[1]);
+        maxX = std::max(maxX, p[0]); maxY = std::max(maxY, p[1]);
+    }
+}
+
+static bool paintIsRadialGradient(const Paint& paint,
+    const std::unordered_map<std::string,GradientDef>* gradients)
+{
+    if(!paint.isGradient() || !gradients) return false;
+    auto it = gradients->find(paint.gradientId);
+    return it != gradients->end() && it->second.kind == GradientKind::Radial
+        && !it->second.stops.empty();
+}
+
+static void appendFillRadial(Mesh& mesh, const std::vector<V2>& ring,
+    V2 center, const PaintEval& paint, int numRings = 10)
+{
+    int n = (int)ring.size();
+    if(n < 3) return;
+
+    uint32_t base = (uint32_t)mesh.vertices.size();
+    auto pushVert = [&](V2 p){
+        Color c = paint(p[0], p[1]);
+        float a = c.a;
+        mesh.vertices.push_back({p[0], p[1], c.r*a, c.g*a, c.b*a, a});
+    };
+
+    pushVert(center); // base + 0
+    for(int k = 1; k <= numRings; k++) {
+        float t = (float)k / (float)numRings;
+        for(int i = 0; i < n; i++)
+            pushVert({ center[0] + (ring[i][0]-center[0])*t,
+                       center[1] + (ring[i][1]-center[1])*t });
+    }
+    auto ringStart = [&](int k){ return base + 1 + (uint32_t)(k-1)*(uint32_t)n; };
+
+    for(int i = 0; i < n; i++) {
+        int j = (i+1)%n;
+        mesh.indices.push_back(base);
+        mesh.indices.push_back(ringStart(1)+i);
+        mesh.indices.push_back(ringStart(1)+j);
+    }
+    for(int k = 1; k < numRings; k++) {
+        for(int i = 0; i < n; i++) {
+            int j = (i+1)%n;
+            uint32_t a0=ringStart(k)+i,   a1=ringStart(k)+j;
+            uint32_t b0=ringStart(k+1)+i, b1=ringStart(k+1)+j;
+            mesh.indices.push_back(a0); mesh.indices.push_back(b0); mesh.indices.push_back(b1);
+            mesh.indices.push_back(a0); mesh.indices.push_back(b1); mesh.indices.push_back(a1);
+        }
+    }
+}
+
 static void appendFill(Mesh& mesh,
-    const std::vector<V2>& poly, Color col)
+    const std::vector<V2>& poly, const PaintEval& paint)
 {
     if(poly.size()<3) return;
     auto tris = earclip::triangulate(poly);
     if(tris.empty()) {
-        TESSLOG("  earclip produced 0 triangles for poly with %d pts", (int)poly.size());
+        TESSLOG("earclip produced 0 triangles for poly with %d pts", (int)poly.size());
         return;
     }
 
@@ -436,19 +637,19 @@ static void appendFill(Mesh& mesh,
         minX=std::min(minX,p[0]); maxX=std::max(maxX,p[0]);
         minY=std::min(minY,p[1]); maxY=std::max(maxY,p[1]);
     }
-    TESSLOG("  fill: %d pts, %d tris, bbox=(%.1f,%.1f)-(%.1f,%.1f) rgba=(%.2f,%.2f,%.2f,%.2f)",
+    TESSLOG("fill: %d pts, %d tris, bbox=(%.1f,%.1f)-(%.1f,%.1f)",
         (int)poly.size(), (int)tris.size()/3,
-        minX,minY,maxX,maxY,
-        col.r,col.g,col.b,col.a);
+        minX,minY,maxX,maxY);
 #endif
 
     uint32_t base = (uint32_t)mesh.vertices.size();
-    float a = col.a;
     for(auto& p : poly) {
         if(!std::isfinite(p[0]) || !std::isfinite(p[1])) {
-            TESSLOG("  WARNING: NaN/Inf vertex (%.3f, %.3f) — skipping fill", p[0], p[1]);
+            TESSLOG("WARNING: NaN/Inf vertex (%.3f, %.3f) — skipping fill", p[0], p[1]);
             return;
         }
+        Color col = paint(p[0], p[1]);
+        float a = col.a;
         mesh.vertices.push_back({p[0],p[1], col.r*a,col.g*a,col.b*a,a});
     }
     for(auto idx : tris)
@@ -456,10 +657,9 @@ static void appendFill(Mesh& mesh,
 }
 
 static void appendTriangleStrip(Mesh& mesh,
-    const std::vector<V2>& tris, Color col)
+    const std::vector<V2>& tris, const PaintEval& paint)
 {
     if(tris.size()<3) return;
-    float a=col.a;
 
 #ifdef _DEBUG
     float minX=tris[0][0],maxX=tris[0][0],minY=tris[0][1],maxY=tris[0][1];
@@ -467,16 +667,17 @@ static void appendTriangleStrip(Mesh& mesh,
         minX=std::min(minX,p[0]); maxX=std::max(maxX,p[0]);
         minY=std::min(minY,p[1]); maxY=std::max(maxY,p[1]);
     }
-    TESSLOG("  stroke: %d tris, bbox=(%.1f,%.1f)-(%.1f,%.1f) rgba=(%.2f,%.2f,%.2f,%.2f)",
+    TESSLOG("stroke: %d tris, bbox=(%.1f,%.1f)-(%.1f,%.1f)",
         (int)tris.size()/3,
-        minX,minY,maxX,maxY,
-        col.r,col.g,col.b,col.a);
+        minX,minY,maxX,maxY);
 #endif
 
     uint32_t base=(uint32_t)mesh.vertices.size();
     for(size_t i=0;i<tris.size();i+=3){
         if(i+2>=tris.size()) break;
         for(int k=0;k<3;k++){
+            Color col = paint(tris[i+k][0], tris[i+k][1]);
+            float a = col.a;
             mesh.vertices.push_back({tris[i+k][0],tris[i+k][1],
                 col.r*a,col.g*a,col.b*a,a});
             mesh.indices.push_back(base+(uint32_t)(i+k));
@@ -571,16 +772,16 @@ static std::vector<std::vector<V2>> applyDash(
 
 static void strokeWithDash(Mesh& out,
     const std::vector<V2>& pts, bool closed,
-    const Style& st, Color color)
+    const Style& st, const PaintEval& paint)
 {
-    if(color.a <= 0.f) return;
     float hw = st.strokeWidth * 0.5f;
     auto segments = applyDash(pts, closed, st.dashArray, st.dashOffset);
+    bool segClosed = closed && st.dashArray.empty();
     for(auto& seg : segments) {
         if(seg.size() < 2) continue;
         std::vector<V2> stris;
-        appendStrokeContour(stris, seg, hw, false, st.lineCap, st.lineJoin);
-        appendTriangleStrip(out, stris, color);
+        appendStrokeContour(stris, seg, hw, segClosed, st.lineCap, st.lineJoin, st.miterLimit);
+        appendTriangleStrip(out, stris, paint);
     }
 }
 
@@ -596,7 +797,9 @@ static void buildFan(Mesh::StencilFill& sf, const std::vector<V2>& pts) {
     }
 }
 
-static void tessellateShape(const SVGShape& shape, Mesh& out) {
+static void tessellateShape(const SVGShape& shape, Mesh& out,
+    const std::unordered_map<std::string,GradientDef>* gradients)
+{
     const Style& st  = shape.style;
     const Mat3&  tf  = shape.transform;
 
@@ -607,31 +810,19 @@ static void tessellateShape(const SVGShape& shape, Mesh& out) {
             p={r[0],r[1]};
         }
     };
-
-    auto fillColor = [&]() -> Color {
-        if(st.fill.none) return Color::none();
-        Color c = st.fill.color;
-        c.a *= st.fillOpacity * globalA;
-        return c;
+    auto makeFillPaint = [&](float bx0,float by0,float bw,float bh) {
+        return makePaintEval(st.fill, st, gradients, bx0,by0,bw,bh, st.fillOpacity*globalA);
     };
-
-    auto strokeColor = [&]() -> Color {
-        if(st.stroke.none) return Color::none();
-        Color c = st.stroke.color;
-        c.a *= globalA;
-        return c;
+    auto makeStrokePaint = [&](float bx0,float by0,float bw,float bh) {
+        return makePaintEval(st.stroke, st, gradients, bx0,by0,bw,bh, st.strokeOpacity*globalA);
     };
 
 #ifdef _DEBUG
-    {
-        Color fc = fillColor();
-        Color sc = strokeColor();
-        TESSLOG("shape kind=%d  fill_none=%d fill=(%.2f,%.2f,%.2f,%.2f)  stroke_none=%d sw=%.1f stroke=(%.2f,%.2f,%.2f,%.2f)  opacity=%.2f",
-            (int)shape.kind,
-            st.fill.none,   fc.r,fc.g,fc.b,fc.a,
-            st.stroke.none, st.strokeWidth, sc.r,sc.g,sc.b,sc.a,
-            globalA);
-    }
+    TESSLOG("shape kind=%d  fill_none=%d fill_grad=%d  stroke_none=%d sw=%.1f stroke_grad=%d  opacity=%.2f",
+        (int)shape.kind,
+        st.fill.none,   st.fill.isGradient(),
+        st.stroke.none, st.strokeWidth, st.stroke.isGradient(),
+        globalA);
 #endif
 
     switch(shape.kind) {
@@ -643,90 +834,130 @@ static void tessellateShape(const SVGShape& shape, Mesh& out) {
             poly={{shape.x,shape.y},{shape.x+shape.width,shape.y},
                   {shape.x+shape.width,shape.y+shape.height},{shape.x,shape.y+shape.height}};
         applyTf(poly);
-        Color fc=fillColor();
-        if(fc.a>0) appendFill(out,poly,fc);
+        float bx,by,bw,bh; computeBounds(poly,bx,by,bw,bh); bw-=bx; bh-=by;
+        if(!st.fill.none) {
+            PaintEval fp = makeFillPaint(bx,by,bw,bh);
+            if(paintIsRadialGradient(st.fill, gradients))
+                appendFillRadial(out, poly, {bx+bw*0.5f, by+bh*0.5f}, fp);
+            else
+                appendFill(out, poly, fp);
+        }
         if(!st.stroke.none)
-            strokeWithDash(out, poly, /*closed=*/true, st, strokeColor());
+            strokeWithDash(out, poly, /*closed=*/true, st, makeStrokePaint(bx,by,bw,bh));
         break;
     }
     case ShapeKind::Circle: {
         auto poly=makeEllipse(shape.cx,shape.cy,shape.r,shape.r);
         applyTf(poly);
-        Color fc=fillColor();
-        if(fc.a>0) appendFill(out,poly,fc);
+        float bx,by,bw,bh; computeBounds(poly,bx,by,bw,bh); bw-=bx; bh-=by;
+        if(!st.fill.none) {
+            PaintEval fp = makeFillPaint(bx,by,bw,bh);
+            if(paintIsRadialGradient(st.fill, gradients))
+                appendFillRadial(out, poly, {bx+bw*0.5f, by+bh*0.5f}, fp);
+            else
+                appendFill(out, poly, fp);
+        }
         if(!st.stroke.none)
-            strokeWithDash(out, poly, /*closed=*/true, st, strokeColor());
+            strokeWithDash(out, poly, /*closed=*/true, st, makeStrokePaint(bx,by,bw,bh));
         break;
     }
     case ShapeKind::Ellipse: {
         auto poly=makeEllipse(shape.cx,shape.cy,shape.rx,shape.ry);
         applyTf(poly);
-        Color fc=fillColor();
-        if(fc.a>0) appendFill(out,poly,fc);
+        float bx,by,bw,bh; computeBounds(poly,bx,by,bw,bh); bw-=bx; bh-=by;
+        if(!st.fill.none) {
+            PaintEval fp = makeFillPaint(bx,by,bw,bh);
+            if(paintIsRadialGradient(st.fill, gradients))
+                appendFillRadial(out, poly, {bx+bw*0.5f, by+bh*0.5f}, fp);
+            else
+                appendFill(out, poly, fp);
+        }
         if(!st.stroke.none)
-            strokeWithDash(out, poly, /*closed=*/true, st, strokeColor());
+            strokeWithDash(out, poly, /*closed=*/true, st, makeStrokePaint(bx,by,bw,bh));
         break;
     }
     case ShapeKind::Line: {
         if(!st.stroke.none){
             std::vector<V2> ln={{shape.x1,shape.y1},{shape.x2,shape.y2}};
             applyTf(ln);
-            strokeWithDash(out, ln, /*closed=*/false, st, strokeColor());
+            float bx,by,bw,bh; computeBounds(ln,bx,by,bw,bh); bw-=bx; bh-=by;
+            strokeWithDash(out, ln, /*closed=*/false, st, makeStrokePaint(bx,by,bw,bh));
         }
         break;
     }
     case ShapeKind::Polyline: {
         auto pts=shape.points;
         applyTf(pts);
-        Color fc=fillColor();
-        if(fc.a>0 && pts.size()>=3) appendFill(out,pts,fc);
+        float bx,by,bw,bh; computeBounds(pts,bx,by,bw,bh); bw-=bx; bh-=by;
+        if(!st.fill.none && pts.size()>=3) {
+            PaintEval fp = makeFillPaint(bx,by,bw,bh);
+            if(paintIsRadialGradient(st.fill, gradients))
+                appendFillRadial(out, pts, {bx+bw*0.5f, by+bh*0.5f}, fp);
+            else
+                appendFill(out, pts, fp);
+        }
         if(!st.stroke.none)
-            strokeWithDash(out, pts, /*closed=*/false, st, strokeColor());
+            strokeWithDash(out, pts, /*closed=*/false, st, makeStrokePaint(bx,by,bw,bh));
         break;
     }
     case ShapeKind::Polygon: {
         auto pts=shape.points;
         applyTf(pts);
-        Color fc=fillColor();
-        if(fc.a>0 && pts.size()>=3) appendFill(out,pts,fc);
+        float bx,by,bw,bh; computeBounds(pts,bx,by,bw,bh); bw-=bx; bh-=by;
+        if(!st.fill.none && pts.size()>=3) {
+            PaintEval fp = makeFillPaint(bx,by,bw,bh);
+            if(paintIsRadialGradient(st.fill, gradients))
+                appendFillRadial(out, pts, {bx+bw*0.5f, by+bh*0.5f}, fp);
+            else
+                appendFill(out, pts, fp);
+        }
         if(!st.stroke.none)
-            strokeWithDash(out, pts, /*closed=*/true, st, strokeColor());
+            strokeWithDash(out, pts, /*closed=*/true, st, makeStrokePaint(bx,by,bw,bh));
         break;
     }
     case ShapeKind::Path: {
         auto rawContours = pathToContours(shape.path);
-        Color fc = fillColor();
-
-        if(fc.a > 0) {
-            // collect transformed contours and compute their bounds
-            std::vector<std::vector<V2>> rings;
-            float minX= 1e30f, minY= 1e30f, maxX=-1e30f, maxY=-1e30f;
-            for(auto& c : rawContours) {
-                auto pts = c.pts;
-                applyTf(pts);
-                if(pts.size() < 3) continue;
+        std::vector<std::vector<V2>> rings;
+        float minX= 1e30f, minY= 1e30f, maxX=-1e30f, maxY=-1e30f;
+        for(auto& c : rawContours) {
+            auto pts = c.pts;
+            applyTf(pts);
+            if(pts.size() >= 2) {
                 for(auto& p : pts) {
                     minX = std::min(minX, p[0]);  minY = std::min(minY, p[1]);
                     maxX = std::max(maxX, p[0]);  maxY = std::max(maxY, p[1]);
                 }
-                rings.push_back(std::move(pts));
             }
+            rings.push_back(std::move(pts));
+        }
+        bool haveBounds = (minX <= maxX);
+        float bw = haveBounds ? maxX-minX : 0.f, bh = haveBounds ? maxY-minY : 0.f;
 
-            if(rings.size() == 1) {
-                appendFill(out, rings[0], fc);
-            } else if(rings.size() > 1) {
+        if(!st.fill.none) {
+            std::vector<std::vector<V2>> fillRings;
+            for(auto& r : rings) if(r.size() >= 3) fillRings.push_back(r);
+
+            if(fillRings.size() == 1) {
+                PaintEval fp = makeFillPaint(minX,minY,bw,bh);
+                if(paintIsRadialGradient(st.fill, gradients))
+                    appendFillRadial(out, fillRings[0], {minX+bw*0.5f, minY+bh*0.5f}, fp);
+                else
+                    appendFill(out, fillRings[0], fp);
+            } else if(fillRings.size() > 1) {
                 Mesh::StencilFill sf;
                 sf.evenOdd = (st.fillRule == FillRule::EvenOdd);
 
-                for(auto& ring : rings)
+                for(auto& ring : fillRings)
                     buildFan(sf, ring);
 
+                PaintEval paint = makeFillPaint(minX,minY,bw,bh);
                 sf.bboxBase = (uint32_t)sf.verts.size();
-                float a = fc.a;
-                sf.verts.push_back({minX, minY, fc.r*a, fc.g*a, fc.b*a, a});
-                sf.verts.push_back({maxX, minY, fc.r*a, fc.g*a, fc.b*a, a});
-                sf.verts.push_back({maxX, maxY, fc.r*a, fc.g*a, fc.b*a, a});
-                sf.verts.push_back({minX, maxY, fc.r*a, fc.g*a, fc.b*a, a});
+                auto pushCorner = [&](float x,float y){
+                    Color c = paint(x,y); float a=c.a;
+                    sf.verts.push_back({x,y, c.r*a,c.g*a,c.b*a,a});
+                };
+                pushCorner(minX,minY); pushCorner(maxX,minY);
+                pushCorner(maxX,maxY); pushCorner(minX,maxY);
 
                 sf.indices.push_back(sf.bboxBase);
                 sf.indices.push_back(sf.bboxBase + 1);
@@ -740,11 +971,9 @@ static void tessellateShape(const SVGShape& shape, Mesh& out) {
         }
 
         if(!st.stroke.none) {
-            for(auto& c : rawContours) {
-                auto pts = c.pts;
-                applyTf(pts);
-                strokeWithDash(out, pts, c.closed, st, strokeColor());
-            }
+            PaintEval paint = makeStrokePaint(minX,minY,bw,bh);
+            for(size_t i = 0; i < rawContours.size(); i++)
+                strokeWithDash(out, rings[i], rawContours[i].closed, st, paint);
         }
         break;
     }
@@ -756,7 +985,7 @@ Mesh tessellateDocument(const SVGDocument& doc) {
 
     Mesh m;
     for(auto& shape : doc.shapes)
-        tessellateShape(shape,m);
+        tessellateShape(shape, m, &doc.gradients);
     
     auto endTime = std::chrono::high_resolution_clock::now();
     float ms = std::chrono::duration<float, std::milli>(endTime - startTime).count();

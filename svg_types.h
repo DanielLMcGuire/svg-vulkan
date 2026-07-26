@@ -5,6 +5,7 @@
 #include <optional>
 #include <cmath>
 #include <cstdint>
+#include <unordered_map>
 
 struct Color {
     float r = 0.f, g = 0.f, b = 0.f, a = 1.f;
@@ -46,6 +47,20 @@ struct Mat3 {
         return { m[0][0]*x + m[1][0]*y + m[2][0],
                  m[0][1]*x + m[1][1]*y + m[2][1] };
     }
+    Mat3 inverse() const {
+        float a=m[0][0], b=m[0][1], c=m[1][0], d=m[1][1], e=m[2][0], f=m[2][1];
+        float det = a*d - b*c;
+        if(fabsf(det) < 1e-12f) return Mat3::identity();
+        float invDet = 1.f/det;
+        Mat3 r;
+        r.m[0][0] =  d*invDet;
+        r.m[0][1] = -b*invDet;
+        r.m[1][0] = -c*invDet;
+        r.m[1][1] =  a*invDet;
+        r.m[2][0] = (c*f - d*e)*invDet;
+        r.m[2][1] = (b*e - a*f)*invDet;
+        return r;
+    }
 };
 
 enum class PathCmd {
@@ -60,10 +75,17 @@ struct PathSegment {
 };
 
 struct Paint {
-    bool  none  = true;
-    Color color = {};
-    static Paint solid(Color c)  { return {false, c}; }
-    static Paint transparent()   { return {true,  {}}; }
+    bool        none  = true;
+    Color       color = {};
+    std::string gradientId;
+    bool        useCurrentColor = false;
+    static Paint solid(Color c)  { return {false, c, {}, false}; }
+    static Paint transparent()   { return {true,  {}, {}, false}; }
+    static Paint currentColor()  { Paint p; p.none=false; p.useCurrentColor=true; return p; }
+    static Paint gradient(const std::string& id, Color fallback) {
+        Paint p; p.none = false; p.color = fallback; p.gradientId = id; return p;
+    }
+    bool isGradient() const { return !gradientId.empty(); }
 };
 
 enum class LineCap  { Butt, Round, Square };
@@ -75,15 +97,42 @@ struct Style {
     Paint    stroke      = Paint::transparent();
     float    strokeWidth = 1.f;
     float    fillOpacity = 1.f;
+    float    strokeOpacity = 1.f;
     float    opacity     = 1.f;
     LineCap  lineCap     = LineCap::Butt;
     LineJoin lineJoin    = LineJoin::Miter;
     float    miterLimit  = 4.f;
     FillRule fillRule    = FillRule::NonZero;
+    Color    currentColor = {0,0,0,1};
 
-    // note for later: odd number of values should duplicated (SVG spec SS11.4).
     std::vector<float> dashArray;
     float              dashOffset = 0.f;
+
+    float       fontSize   = 16.f;
+    std::string textAnchor = "start"; // start | middle | end
+};
+
+enum class GradientKind { Linear, Radial };
+enum class SpreadMethod { Pad, Reflect, Repeat };
+
+struct GradientStop {
+    float offset = 0.f; // 0..1
+    Color color  = {0,0,0,1};
+};
+
+struct GradientDef {
+    GradientKind kind = GradientKind::Linear;
+    bool         userSpaceOnUse = false;
+    SpreadMethod spread = SpreadMethod::Pad;
+    Mat3         gradientTransform = Mat3::identity();
+
+    // linear
+    float x1=0.f, y1=0.f, x2=1.f, y2=0.f;
+    // radial
+    float cx=0.5f, cy=0.5f, r=0.5f, fx=0.5f, fy=0.5f;
+    bool  hasFocal = false;
+
+    std::vector<GradientStop> stops;
 };
 
 enum class ShapeKind { Path, Rect, Circle, Ellipse, Line, Polygon, Polyline };
@@ -113,4 +162,6 @@ struct SVGDocument {
     SVGViewport           viewport;
     std::vector<SVGShape> shapes;
     std::string           title;
+    std::string           path;
+    std::unordered_map<std::string, GradientDef> gradients;
 };

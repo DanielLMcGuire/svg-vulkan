@@ -188,6 +188,7 @@ bool VulkanSVGRenderer::createInstance() {
 }
 
 bool VulkanSVGRenderer::init(HWND hwnd, int width, int height) {
+    auto startTime = std::chrono::high_resolution_clock::now();
     m_width  = width;
     m_height = height;
     RLOG("init: %dx%d", width, height);
@@ -210,7 +211,9 @@ bool VulkanSVGRenderer::init(HWND hwnd, int width, int height) {
     if(!createDescriptorSets())        { RLOG("FAILED createDescriptorSets");         return false; }
     if(!createCommandBuffers())        { RLOG("FAILED createCommandBuffers");         return false; }
     if(!createSyncObjects())           { RLOG("FAILED createSyncObjects");            return false; }
-    RLOG("init complete");
+    auto endTime = std::chrono::high_resolution_clock::now();
+    float ms = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+    RLOG("init complete in %.2f ms", ms);
     return true;
 }
 #else
@@ -281,6 +284,7 @@ bool VulkanSVGRenderer::createInstance() {
 }
 
 bool VulkanSVGRenderer::init(Display* display, Window window, int width, int height) {
+    auto startTime = std::chrono::high_resolution_clock::now();
     m_width  = width;
     m_height = height;
     RLOG("init (X11): %dx%d", width, height);
@@ -303,7 +307,9 @@ bool VulkanSVGRenderer::init(Display* display, Window window, int width, int hei
     if(!createDescriptorSets())        { RLOG("FAILED createDescriptorSets");         return false; }
     if(!createCommandBuffers())        { RLOG("FAILED createCommandBuffers");         return false; }
     if(!createSyncObjects())           { RLOG("FAILED createSyncObjects");            return false; }
-    RLOG("init complete");
+    auto endTime = std::chrono::high_resolution_clock::now();
+    float ms = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+    RLOG("init complete in %.2f ms", ms);
     return true;
 }
 #endif
@@ -346,12 +352,13 @@ bool VulkanSVGRenderer::pickPhysicalDevice() {
         vkGetPhysicalDeviceSurfacePresentModesKHR(dev, m_surface, &modeCount, nullptr);
         if(fmtCount == 0 || modeCount == 0) continue;
 
-        m_physDevice     = dev;
+        m_physDevice = dev;
         m_graphicsFamily = gfx;
         m_presentFamily  = pres;
 
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(dev, &props);
+
         RLOG("GPU candidate: '%s'  type=%d  gfxQ=%u presQ=%u",
              props.deviceName, (int)props.deviceType, gfx, pres);
         if(props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) break;
@@ -362,6 +369,10 @@ bool VulkanSVGRenderer::pickPhysicalDevice() {
     m_msaaSamples = getMaxSampleCount();
     RLOG("Selected GPU: graphicsFamily=%u presentFamily=%u msaaSamples=%d",
          m_graphicsFamily, m_presentFamily, (int)m_msaaSamples);
+    VkPhysicalDeviceDriverProperties d{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 p{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,&d};
+    vkGetPhysicalDeviceProperties2(m_physDevice,&p);
+    RLOG("Using driver: %s", d.driverInfo);
     return true;
 }
 
@@ -765,11 +776,13 @@ VkShaderModule VulkanSVGRenderer::createShaderModule(const std::vector<char>& co
 }
 
 void VulkanSVGRenderer::initShaders() {
+    RLOG("Loading shaders...");
     auto vertCode = readFile("shader.vert.spv");
     RLOG("Loaded shader.vert.spv");
     auto fragCode = readFile("shader.frag.spv");
     RLOG("Loaded shader.frag.spv");
 
+    RLOG("Initializing shaders...");
     m_vertShaderModule = createShaderModule(vertCode);
     RLOG("Initialized vertex shader");
     m_fragShaderModule = createShaderModule(fragCode);
@@ -1365,7 +1378,7 @@ void VulkanSVGRenderer::loadMesh(const Mesh& mesh) {
             sd.bboxFirstIndex = sd.fanFirstIndex + bboxIdxStart;
             sd.evenOdd        = sf.evenOdd;
 
-            RLOG("  stencilFill: evenOdd=%d  verts=%d  fanIdxCount=%d  vertexOffset=%d",
+            RLOG("stencilFill: evenOdd=%d  verts=%d  fanIdxCount=%d  vertexOffset=%d",
                  (int)sd.evenOdd,
                  (int)sf.verts.size(),
                  (int)sd.fanIndexCount,
@@ -1393,13 +1406,14 @@ void VulkanSVGRenderer::loadDocument(const SVGDocument& doc) {
     m_svgW = doc.viewport.w;
     m_svgH = doc.viewport.h;
     m_svgTitle = doc.title;
+    m_svgPath = doc.path;
     RLOG("loadDocument: svgW=%.0f svgH=%.0f  shapes=%d  title='%s'",
          m_svgW, m_svgH, (int)doc.shapes.size(), m_svgTitle.c_str());
     loadMesh(tessellateDocument(doc));
 }
 
-void VulkanSVGRenderer::loadSVGString(const std::string& svg) {
-    loadDocument(parseSVG(svg));
+void VulkanSVGRenderer::loadSVGString(const std::string& svg, const std::string& filePath) {
+    loadDocument(parseSVG(svg, filePath));
 }
 
 void VulkanSVGRenderer::resize(int width, int height) {
@@ -1579,8 +1593,8 @@ void VulkanSVGRenderer::render(float bgR, float bgG, float bgB) {
     auto cpuEnd = std::chrono::high_resolution_clock::now();
     float cpuMs = std::chrono::duration<float, std::milli>(cpuEnd - cpuStart).count();
     float fps = 1000.0f / cpuMs;
-    printf("[FRAME] CPU: %.2f ms GPU: %.2f ms FPS: %.1f              \r",
-        cpuMs, gpuMs, fps);
+    printf("[PERF] CPU: %6.2f ms GPU: %6.2f ms FPS: %6.1f\r",
+       cpuMs, gpuMs, fps);
 }
 
 void VulkanSVGRenderer::present(bool vsync) {
