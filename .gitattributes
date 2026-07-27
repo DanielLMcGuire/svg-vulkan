@@ -1,1 +1,1 @@
-stb_truetype.h linguist-detectable=false
+third_party/**/* linguist-detectable=false
